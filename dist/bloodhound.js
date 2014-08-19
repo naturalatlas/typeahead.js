@@ -4,7 +4,17 @@
  * Copyright 2013-2014 Twitter, Inc. and other contributors; Licensed MIT
  */
 
-(function($) {
+(function(root, factory) {
+    if (typeof define === "function" && define.amd) {
+        define("bloodhound", [ "jquery" ], function() {
+            return root.returnExportsGlobal = factory();
+        });
+    } else if (typeof exports === "object") {
+        module.exports = factory(require("jquery"));
+    } else {
+        root["Bloodhound"] = factory(jQuery);
+    }
+})(this, function() {
     var _ = function() {
         "use strict";
         return {
@@ -28,6 +38,12 @@
             isObject: $.isPlainObject,
             isUndefined: function(obj) {
                 return typeof obj === "undefined";
+            },
+            isElement: function(obj) {
+                return !!(obj && obj.nodeType === 1);
+            },
+            isJQuery: function(obj) {
+                return obj instanceof $;
             },
             toStr: function toStr(s) {
                 return _.isUndefined(s) || s === null ? "" : s + "";
@@ -66,6 +82,9 @@
                 return !!result;
             },
             mixin: $.extend,
+            clone: function(obj) {
+                return $.extend(true, {}, obj);
+            },
             getUniqueId: function() {
                 var counter = 0;
                 return function() {
@@ -173,6 +192,7 @@
                 if (this.size >= this.maxSize) {
                     this.list.remove(tailItem);
                     delete this.hash[tailItem.key];
+                    this.size--;
                 }
                 if (node = this.hash[key]) {
                     node.val = val;
@@ -302,7 +322,7 @@
             return JSON.stringify(_.isUndefined(val) ? null : val);
         }
         function decode(val) {
-            return JSON.parse(val);
+            return $.parseJSON(val);
         }
     }();
     var Transport = function() {
@@ -311,7 +331,7 @@
         function Transport(o) {
             o = o || {};
             this.cancelled = false;
-            this.lastUrl = null;
+            this.lastReq = null;
             this._send = o.transport ? callbackToDeferred(o.transport) : $.ajax;
             this._get = o.rateLimiter ? o.rateLimiter(this._get) : this._get;
             this._cache = o.cache === false ? new LruCache(0) : sharedCache;
@@ -323,49 +343,54 @@
             sharedCache.reset();
         };
         _.mixin(Transport.prototype, {
-            _get: function(url, o, cb) {
-                var that = this, jqXhr;
-                if (this.cancelled || url !== this.lastUrl) {
+            _fingerprint: function fingerprint(o) {
+                o = o || {};
+                return o.url + o.type + $.param(o.data || {});
+            },
+            _get: function(o, cb) {
+                var that = this, fingerprint, jqXhr;
+                fingerprint = this._fingerprint(o);
+                if (this.cancelled || fingerprint !== this.lastReq) {
                     return;
                 }
-                if (jqXhr = pendingRequests[url]) {
+                if (jqXhr = pendingRequests[fingerprint]) {
                     jqXhr.done(done).fail(fail);
                 } else if (pendingRequestsCount < maxPendingRequests) {
                     pendingRequestsCount++;
-                    pendingRequests[url] = this._send(url, o).done(done).fail(fail).always(always);
+                    pendingRequests[fingerprint] = this._send(o).done(done).fail(fail).always(always);
                 } else {
                     this.onDeckRequestArgs = [].slice.call(arguments, 0);
                 }
                 function done(resp) {
                     cb && cb(null, resp);
-                    that._cache.set(url, resp);
+                    that._cache.set(fingerprint, resp);
                 }
                 function fail() {
                     cb && cb(true);
                 }
                 function always() {
                     pendingRequestsCount--;
-                    delete pendingRequests[url];
+                    delete pendingRequests[fingerprint];
                     if (that.onDeckRequestArgs) {
                         that._get.apply(that, that.onDeckRequestArgs);
                         that.onDeckRequestArgs = null;
                     }
                 }
             },
-            get: function(url, o, cb) {
-                var resp;
-                if (_.isFunction(o)) {
-                    cb = o;
-                    o = {};
-                }
+            get: function(o, cb) {
+                var resp, fingerprint;
+                o = _.isString(o) ? {
+                    url: o
+                } : o || {};
+                fingerprint = this._fingerprint(o);
                 this.cancelled = false;
-                this.lastUrl = url;
-                if (resp = this._cache.get(url)) {
+                this.lastReq = fingerprint;
+                if (resp = this._cache.get(fingerprint)) {
                     _.defer(function() {
                         cb && cb(null, resp);
                     });
                 } else {
-                    this._get(url, o, cb);
+                    this._get(o, cb);
                 }
                 return !!resp;
             },
@@ -375,9 +400,9 @@
         });
         return Transport;
         function callbackToDeferred(fn) {
-            return function customSendWrapper(url, o) {
+            return function customSendWrapper(o) {
                 var deferred = $.Deferred();
-                fn(url, o, onSuccess, onError);
+                fn(o, onSuccess, onError);
                 return deferred;
                 function onSuccess(resp) {
                     _.defer(function() {
@@ -450,6 +475,9 @@
                 return matches ? _.map(unique(matches), function(id) {
                     return that.datums[id];
                 }) : [];
+            },
+            all: function all() {
+                return this.datums;
             },
             reset: function reset() {
                 this.datums = [];
@@ -546,6 +574,7 @@
             defaults = {
                 url: null,
                 cache: true,
+                under: 5,
                 wildcard: "%QUERY",
                 replace: null,
                 rateLimitBy: "debounce",
@@ -579,21 +608,19 @@
             }
         }
     }();
-    (function(root) {
+    var Bloodhound = function() {
         "use strict";
         var old, keys;
-        old = root.Bloodhound;
+        old = window && window.Bloodhound;
         keys = {
             data: "data",
             protocol: "protocol",
             thumbprint: "thumbprint"
         };
-        root.Bloodhound = Bloodhound;
         function Bloodhound(o) {
             if (!o || !o.local && !o.prefetch && !o.remote) {
                 $.error("one of local, prefetch, or remote is required");
             }
-            this.limit = o.limit || 5;
             this.sorter = getSorter(o.sorter);
             this.dupDetector = o.dupDetector || ignoreDuplicates;
             this.local = oParser.local(o);
@@ -607,11 +634,21 @@
             this.storage = this.cacheKey ? new PersistentStorage(this.cacheKey) : null;
         }
         Bloodhound.noConflict = function noConflict() {
-            root.Bloodhound = old;
+            window && (window.Bloodhound = old);
             return Bloodhound;
         };
         Bloodhound.tokenizers = tokenizers;
         _.mixin(Bloodhound.prototype, {
+            __ttAdapter: function ttAdapter() {
+                var that = this;
+                return this.transport ? withBackfill : withoutBackfill;
+                function withBackfill(query, backfill) {
+                    return that.get(query, backfill);
+                }
+                function withoutBackfill(query) {
+                    return that.get(query);
+                }
+            },
             _loadPrefetch: function loadPrefetch(o) {
                 var that = this, serialized, deferred;
                 if (serialized = this._readFromStorage(o.thumbprint)) {
@@ -628,14 +665,22 @@
                 }
             },
             _getFromRemote: function getFromRemote(query, cb) {
-                var that = this, url, uriEncodedQuery;
-                if (!this.transport) {
+                var that = this, url, uriEncodedQuery, ajax;
+                if (!this.transport || !cb) {
                     return;
                 }
                 query = query || "";
                 uriEncodedQuery = encodeURIComponent(query);
-                url = this.remote.replace ? this.remote.replace(this.remote.url, query) : this.remote.url.replace(this.remote.wildcard, uriEncodedQuery);
-                return this.transport.get(url, this.remote.ajax, handleRemoteResponse);
+                ajax = _.clone(this.remote.ajax);
+                if (this.remote.before) {
+                    ajax = this.remote.before(this.remote.url, query, ajax);
+                } else if (this.remote.replace) {
+                    url = this.remote.replace(this.remote.url, query);
+                } else {
+                    url = this.remote.url.replace(this.remote.wildcard, uriEncodedQuery);
+                }
+                ajax.url = url || ajax.url || this.remote.url;
+                return this.transport.get(ajax, handleRemoteResponse);
                 function handleRemoteResponse(err, resp) {
                     err ? cb([]) : cb(that.remote.filter ? that.remote.filter(resp) : resp);
                 }
@@ -676,26 +721,28 @@
             add: function add(data) {
                 this.index.add(data);
             },
-            get: function get(query, cb) {
-                var that = this, matches = [], cacheHit = false;
-                matches = this.index.get(query);
-                matches = this.sorter(matches).slice(0, this.limit);
-                matches.length < this.limit ? cacheHit = this._getFromRemote(query, returnRemoteMatches) : this._cancelLastRemoteRequest();
-                if (!cacheHit) {
-                    (matches.length > 0 || !this.transport) && cb && cb(matches);
+            get: function get(query, backfill) {
+                var that = this, local;
+                local = this.sorter(this.index.get(query));
+                if (this.remote) {
+                    local.length < this.remote.under ? this._getFromRemote(query, processRemote) : this._cancelLastRemoteRequest();
+                    return local.slice();
                 }
-                function returnRemoteMatches(remoteMatches) {
-                    var matchesWithBackfill = matches.slice(0);
-                    _.each(remoteMatches, function(remoteMatch) {
+                return local;
+                function processRemote(remote) {
+                    var nonDuplicates = [];
+                    _.each(remote, function(r) {
                         var isDuplicate;
-                        isDuplicate = _.some(matchesWithBackfill, function(match) {
-                            return that.dupDetector(remoteMatch, match);
+                        isDuplicate = _.some(local, function(l) {
+                            return that.dupDetector(r, l);
                         });
-                        !isDuplicate && matchesWithBackfill.push(remoteMatch);
-                        return matchesWithBackfill.length < that.limit;
+                        !isDuplicate && nonDuplicates.push(r);
                     });
-                    cb && cb(that.sorter(matchesWithBackfill));
+                    backfill && backfill(nonDuplicates);
                 }
+            },
+            all: function all() {
+                return this.index.all();
             },
             clear: function clear() {
                 this.index.reset();
@@ -707,7 +754,7 @@
                 this.transport && Transport.resetCache();
             },
             ttAdapter: function ttAdapter() {
-                return _.bind(this.get, this);
+                return this.__ttAdapter();
             }
         });
         return Bloodhound;
@@ -723,5 +770,6 @@
         function ignoreDuplicates() {
             return false;
         }
-    })(this);
-})(window.jQuery);
+    }(this);
+    return Bloodhound;
+});
