@@ -47,6 +47,7 @@ var Dataset = (function() {
     this.async = _.isUndefined(o.async) ? this.source.length > 1 : !!o.async;
 
     this.$el = $(this.html.dataset.replace('%CLASS%', this.name));
+    this.queryTokenizer = o.queryTokenizer || function(query) {return [query];}
   }
 
   // static methods
@@ -126,7 +127,7 @@ var Dataset = (function() {
       this.highlight && highlight({
         className: this.classes.highlight,
         node: fragment,
-        pattern: query
+        pattern: cleanPatterns(that.queryTokenizer(query))
       });
 
       return fragment;
@@ -221,5 +222,14 @@ var Dataset = (function() {
   function isValidName(str) {
     // dashes, underscores, letters, and numbers
     return (/^[_a-zA-Z0-9-]+$/).test(str);
+  }
+
+  function cleanPatterns(patterns) {
+    var cleaned = [];
+    // rid of empty patterns
+    for(var i = 0; i < patterns.length; i ++) {
+      if(patterns[i].length > 0) cleaned.push(patterns[i]);
+    }
+    return cleaned;
   }
 })();
