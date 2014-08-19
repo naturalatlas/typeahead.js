@@ -33,6 +33,10 @@ var _ = (function() {
 
     isUndefined: function(obj) { return typeof obj === 'undefined'; },
 
+    isElement: function(obj) { return !!(obj && obj.nodeType === 1); },
+
+    isJQuery: function(obj) { return obj instanceof $; },
+
     toStr: function toStr(s) {
       return (_.isUndefined(s) || s === null) ? '' : s + '';
     },
@@ -79,6 +83,8 @@ var _ = (function() {
     },
 
     mixin: $.extend,
+
+    clone: function(obj) { return $.extend(true, {}, obj); },
 
     getUniqueId: (function() {
       var counter = 0;

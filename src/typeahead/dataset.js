@@ -7,12 +7,17 @@
 var Dataset = (function() {
   'use strict';
 
-  var datasetKey = 'ttDataset', valueKey = 'ttValue', datumKey = 'ttDatum';
+  var keys;
+
+  keys = {
+    val: 'tt-selectable-display',
+    obj: 'tt-selectable-object'
+  };
 
   // constructor
   // -----------
 
-  function Dataset(o) {
+  function Dataset(o, www) {
     o = o || {};
     o.templates = o.templates || {};
 
@@ -24,33 +29,40 @@ var Dataset = (function() {
       $.error('invalid dataset name: ' + o.name);
     }
 
-    // tracks the last query the dataset was updated for
-    this.query = null;
+    www.mixin(this);
 
     this.highlight = !!o.highlight;
     this.name = o.name || _.getUniqueId();
 
-    this.source = o.source;
+    this.limit = o.limit || 5;
     this.displayFn = getDisplayFn(o.display || o.displayKey);
-
     this.templates = getTemplates(o.templates, this.displayFn);
 
-    this.$el = $(html.dataset.replace('%CLASS%', this.name));
+    // use duck typing to see if source is a bloodhound instance by checking
+    // for the __ttAdapter property; otherwise assume it is a function
+    this.source = o.source.__ttAdapter ? o.source.__ttAdapter() : o.source;
+
+    // if the async option is undefined, inspect the source signature as
+    // a hint to figuring out of the source will return async results
+    this.async = _.isUndefined(o.async) ? this.source.length > 1 : !!o.async;
+
+    this.$el = $(this.html.dataset.replace('%CLASS%', this.name));
   }
 
   // static methods
   // --------------
 
-  Dataset.extractDatasetName = function extractDatasetName(el) {
-    return $(el).data(datasetKey);
-  };
+  Dataset.extractData = function extractData(el) {
+    var $el = $(el);
 
-  Dataset.extractValue = function extractDatum(el) {
-    return $(el).data(valueKey);
-  };
+    if ($el.data(keys.obj)) {
+      return {
+        val: $el.data(keys.val) || '',
+        obj: $el.data(keys.obj) || null
+      };
+    }
 
-  Dataset.extractDatum = function extractDatum(el) {
-    return $(el).data(datumKey);
+    return null;
   };
 
   // instance methods
@@ -60,80 +72,68 @@ var Dataset = (function() {
 
     // ### private
 
-    _render: function render(query, suggestions) {
-      if (!this.$el) { return; }
-
-      var that = this, hasSuggestions;
-
+    _overwrite: function overwrite(query, results) {
       this.$el.empty();
-      hasSuggestions = suggestions && suggestions.length;
+      results = results || [];
 
-      if (!hasSuggestions && this.templates.empty) {
-        this.$el
-        .html(getEmptyHtml())
-        .prepend(that.templates.header ? getHeaderHtml() : null)
-        .append(that.templates.footer ? getFooterHtml() : null);
+      if (results.length) {
+        this.$el.html(this._getResultsHtml(query, results));
       }
 
-      else if (hasSuggestions) {
-        this.$el
-        .html(getSuggestionsHtml())
-        .prepend(that.templates.header ? getHeaderHtml() : null)
-        .append(that.templates.footer ? getFooterHtml() : null);
+      else if (this.async && this.templates.pending) {
+        // TODO: render pending temlate
       }
 
-      this.trigger('rendered');
-
-      function getEmptyHtml() {
-        return that.templates.empty({ query: query, isEmpty: true });
+      else if (!this.async && this.templates.notFound) {
+        // TODO: render empty temlate
       }
 
-      function getSuggestionsHtml() {
-        var $suggestions, nodes;
+      this.trigger('rendered', this.name, results, false);
+    },
 
-        $suggestions = $(html.suggestions).css(css.suggestions);
+    _append: function append(query, results) {
+      results = results || [];
 
-        // jQuery#append doesn't support arrays as the first argument
-        // until version 1.8, see http://bugs.jquery.com/ticket/11231
-        nodes = _.map(suggestions, getSuggestionNode);
-        $suggestions.append.apply($suggestions, nodes);
-
-        that.highlight && highlight({
-          className: 'tt-highlight',
-          node: $suggestions[0],
-          pattern: query
-        });
-
-        return $suggestions;
-
-        function getSuggestionNode(suggestion) {
-          var $el;
-
-          $el = $(html.suggestion)
-          .append(that.templates.suggestion(suggestion))
-          .data(datasetKey, that.name)
-          .data(valueKey, that.displayFn(suggestion))
-          .data(datumKey, suggestion);
-
-          $el.children().each(function() { $(this).css(css.suggestionChild); });
-
-          return $el;
-        }
+      // TODO: remove pending template if shown
+      if (results.length) {
+        this.$el.append(this._getResultsHtml(query, results));
       }
 
-      function getHeaderHtml() {
-        return that.templates.header({
-          query: query,
-          isEmpty: !hasSuggestions
-        });
+      else if (this.templates.notFound) {
+        // TODO: render empty temlate
       }
 
-      function getFooterHtml() {
-        return that.templates.footer({
-          query: query,
-          isEmpty: !hasSuggestions
-        });
-      }
+      this.trigger('rendered', this.name, results, true);
+    },
+
+    _getResultsHtml: function getResultsHtml(query, results) {
+      var that = this, fragment;
+
+      fragment = document.createDocumentFragment();
+      _.each(results, function getResultNode(result) {
+        var $el, context;
+
+        context = that._injectQuery(query, result);
+
+        $el = $(that.html.result)
+        .append(that.templates.result(context))
+        .data(keys.val, that.displayFn(result))
+        .data(keys.obj, result);
+
+        fragment.appendChild($el[0]);
+      });
+
+      this.highlight && highlight({
+        className: this.classes.highlight,
+        node: fragment,
+        pattern: query
+      });
+
+      return fragment;
+    },
+
+    _injectQuery: function injectQuery(query, obj) {
+      return _.isObject(obj) ? _.mixin({ _query: query }, obj) : obj;
     },
 
     // ### public
@@ -143,24 +143,39 @@ var Dataset = (function() {
     },
 
     update: function update(query) {
-      var that = this;
+      var that = this, canceled = false, results, atLimit;
 
-      this.query = query;
-      this.canceled = false;
-      this.source(query, render);
+      // cancel possible pending update
+      this.cancel();
 
-      function render(suggestions) {
+      this.cancel = function cancel() {
+        canceled = true;
+        that.cancel = $.noop;
+        that.async && that.trigger('asyncCanceled', query);
+      };
+
+      results = (this.source(query, append) || []).slice(0, this.limit);
+      atLimit = results.length >= this.limit;
+
+      this._overwrite(query, results);
+
+      if (!atLimit && this.async) {
+        this.trigger('asyncRequested', query);
+      }
+
+      function append(results) {
         // if the update has been canceled or if the query has changed
-        // do not render the suggestions as they've become outdated
-        if (!that.canceled && query === that.query) {
-          that._render(query, suggestions);
+        // do not render the results as they've become outdated
+        if (!canceled && !atLimit) {
+          that.cancel = $.noop;
+          that._append(query, results);
+          that.async && that.trigger('asyncReceived', query);
         }
       }
     },
 
-    cancel: function cancel() {
-      this.canceled = true;
-    },
+    // cancel function gets set in #update
+    cancel: $.noop,
 
     clear: function clear() {
       this.cancel();
@@ -195,10 +210,10 @@ var Dataset = (function() {
       empty: templates.empty && _.templatify(templates.empty),
       header: templates.header && _.templatify(templates.header),
       footer: templates.footer && _.templatify(templates.footer),
-      suggestion: templates.suggestion || suggestionTemplate
+      result: templates.result || resultTemplate
     };
 
-    function suggestionTemplate(context) {
+    function resultTemplate(context) {
       return '<p>' + displayFn(context) + '</p>';
     }
   }

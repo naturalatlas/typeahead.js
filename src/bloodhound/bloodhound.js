@@ -4,16 +4,13 @@
  * Copyright 2013-2014 Twitter, Inc. and other contributors; Licensed MIT
  */
 
-(function(root) {
+var Bloodhound = (function() {
   'use strict';
 
   var old, keys;
 
-  old = root.Bloodhound;
+  old = window && window.Bloodhound;
   keys = { data: 'data', protocol: 'protocol', thumbprint: 'thumbprint' };
-
-  // add Bloodhoud to global context
-  root.Bloodhound = Bloodhound;
 
   // constructor
   // -----------
@@ -23,7 +20,6 @@
       $.error('one of local, prefetch, or remote is required');
     }
 
-    this.limit = o.limit || 5;
     this.sorter = getSorter(o.sorter);
     this.dupDetector = o.dupDetector || ignoreDuplicates;
 
@@ -49,7 +45,7 @@
   // --------------
 
   Bloodhound.noConflict = function noConflict() {
-    root.Bloodhound = old;
+    window && (window.Bloodhound = old);
     return Bloodhound;
   };
 
@@ -59,6 +55,22 @@
   // ----------------
 
   _.mixin(Bloodhound.prototype, {
+
+    // ### super secret stuff used for integration with jquery plugin
+
+    __ttAdapter: function ttAdapter() {
+      var that = this;
+
+      return this.transport ? withBackfill : withoutBackfill;
+
+      function withBackfill(query, backfill) {
+        return that.get(query, backfill);
+      }
+
+      function withoutBackfill(query) {
+        return that.get(query);
+      }
+    },
 
     // ### private
 
@@ -86,18 +98,28 @@
     },
 
     _getFromRemote: function getFromRemote(query, cb) {
-      var that = this, url, uriEncodedQuery;
+      var that = this, url, uriEncodedQuery, ajax;
 
-      if (!this.transport) { return; }
+      if (!this.transport || !cb) { return; }
 
       query = query || '';
       uriEncodedQuery = encodeURIComponent(query);
+      ajax = _.clone(this.remote.ajax);
 
-      url = this.remote.replace ?
-        this.remote.replace(this.remote.url, query) :
-        this.remote.url.replace(this.remote.wildcard, uriEncodedQuery);
+      if (this.remote.before) {
+        ajax = this.remote.before(this.remote.url, query, ajax);
+      }
 
-      return this.transport.get(url, this.remote.ajax, handleRemoteResponse);
+      else if (this.remote.replace) {
+        url = this.remote.replace(this.remote.url, query);
+      }
+
+      else {
+        url = this.remote.url.replace(this.remote.wildcard, uriEncodedQuery);
+      }
+
+      ajax.url = url || ajax.url || this.remote.url;
+      return this.transport.get(ajax, handleRemoteResponse);
 
       function handleRemoteResponse(err, resp) {
         err ? cb([]) : cb(that.remote.filter ? that.remote.filter(resp) : resp);
@@ -163,44 +185,43 @@
       this.index.add(data);
     },
 
-    get: function get(query, cb) {
-      var that = this, matches = [], cacheHit = false;
+    get: function get(query, backfill) {
+      var that = this, local;
 
-      matches = this.index.get(query);
-      matches = this.sorter(matches).slice(0, this.limit);
+      local = this.sorter(this.index.get(query));
 
-      matches.length < this.limit ?
-        (cacheHit = this._getFromRemote(query, returnRemoteMatches)) :
-        this._cancelLastRemoteRequest();
+      if (this.remote) {
+        local.length < this.remote.under ?
+          this._getFromRemote(query, processRemote) :
+          this._cancelLastRemoteRequest();
 
-      // if a cache hit occurred, skip rendering local matches
-      // because the rendering of local/remote matches is already
-      // in the event loop
-      if (!cacheHit) {
-        // only render if there are some local suggestions or we're
-        // going to the network to backfill
-        (matches.length > 0 || !this.transport) && cb && cb(matches);
+        // return a copy to guarantee no changes within this scope
+        // as this array will get used when processing the remote results
+        return local.slice();
       }
 
-      function returnRemoteMatches(remoteMatches) {
-        var matchesWithBackfill = matches.slice(0);
+      return local;
 
-        _.each(remoteMatches, function(remoteMatch) {
+      function processRemote(remote) {
+        var nonDuplicates = [];
+
+        _.each(remote, function(r) {
           var isDuplicate;
 
           // checks for duplicates
-          isDuplicate = _.some(matchesWithBackfill, function(match) {
-            return that.dupDetector(remoteMatch, match);
+          isDuplicate = _.some(local, function(l) {
+            return that.dupDetector(r, l);
           });
 
-          !isDuplicate && matchesWithBackfill.push(remoteMatch);
-
-          // if we're at the limit, we no longer need to process
-          // the remote results and can break out of the each loop
-          return matchesWithBackfill.length < that.limit;
+          !isDuplicate && nonDuplicates.push(r);
         });
-        cb && cb(that.sorter(matchesWithBackfill));
+
+        backfill && backfill(nonDuplicates);
       }
+    },
+
+    all: function all() {
+      return this.index.all();
     },
 
     clear: function clear() {
@@ -215,7 +236,10 @@
       this.transport && Transport.resetCache();
     },
 
-    ttAdapter: function ttAdapter() { return _.bind(this.get, this); }
+    // DEPRECATED: will be removed in v1
+    ttAdapter: function ttAdapter() {
+      return this.__ttAdapter();
+    }
   });
 
   return Bloodhound;

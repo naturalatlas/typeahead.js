@@ -126,6 +126,6 @@ var PersistentStorage = (function() {
   }
 
   function decode(val) {
-    return JSON.parse(val);
+    return $.parseJSON(val);
   }
 })();
