@@ -6,10 +6,10 @@
 
 var html = (function() {
   return {
-    wrapper: '<span class="twitter-typeahead"></span>',
-    dropdown: '<span class="tt-dropdown-menu"></span>',
+    wrapper: '<div class="twitter-typeahead"></div>',
+    dropdown: '<div class="tt-dropdown-menu"></div>',
     dataset: '<div class="tt-dataset-%CLASS%"></div>',
-    suggestions: '<span class="tt-suggestions"></span>',
+    suggestions: '<div class="tt-suggestions"></div>',
     suggestion: '<div class="tt-suggestion"></div>'
   };
 })();
